@@ -1,0 +1,11 @@
+.env
+.credentials
+node_modules
+dist
+build
+coverage
+logs
+*.log
+*.tmp
+tasks.db*
+.DS_Store
