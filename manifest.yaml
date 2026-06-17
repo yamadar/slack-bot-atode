@@ -20,7 +20,7 @@ features:
     - command: /later
       description: 共有「後で」に追加（引数なしで入力モーダル）
       usage_hint: "[タスク内容]"
-      should_escape: false
+      should_escape: true
 oauth_config:
   scopes:
     bot:

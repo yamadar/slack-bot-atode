@@ -261,13 +261,48 @@ flowchart LR
 
 ---
 
+## 本文テキストとメンション
+
+タスク本文は **3 つの入口すべてで Slack mrkdwn エンコード形**（`<@U…>` などのトークン＋
+`&` `<` `>` はエスケープ済み）に正規化して保存し、表示も共通処理を通します。これにより
+「`@yamadar` をどの経路で入力しても同じく本物のメンションになる」挙動に統一しています。
+
+| 入口 | 取り込み方法 | 保存形 |
+| --- | --- | --- |
+| `/later @yamadar …` | スラッシュコマンド（`should_escape: true`）を Slack 側で変換 | `<@U…>` |
+| ＋追加 / 編集 モーダル | `rich_text_input` → `richTextToMrkdwn()` で変換 | `<@U…>` |
+| メッセージメニュー | `message.text` が元から変換済み | `<@U…>` |
+
+```mermaid
+flowchart LR
+    Slash["/later<br/>(should_escape:true)"] --> Canon
+    Modal["rich_text_input<br/>richTextToMrkdwn()"] --> Canon
+    Msg["message.text"] --> Canon
+    Canon["保存: Slack mrkdwn 形<br/>(text カラム)"] --> Disp["body() = mdSafe()"]
+    Disp --> Home["Home / ミラー表示"]
+```
+
+- **表示の安全化（`mdSafe`）**: ユーザー・チャンネル・リンクのメンションはそのまま活かしつつ、
+  `@channel` / `@here` / `@everyone`・ユーザーグループは**通知が飛ばないようプレーン化**します
+  （チャンネルミラーは実メッセージのため、一斉通知の誤爆を防ぐ）。
+- **メンション偽装の防止**: モーダルやスラッシュで**文字として** `<@U…>` と打っても、テキストは
+  エスケープされるのでメンションにはなりません。実際の選択（rich_text のユーザー要素 / Slack の
+  変換）だけが `<@U…>` になります。
+- **編集時のプリフィル**: 保存済み mrkdwn は `mrkdwnToRichText()` で `rich_text_input` の
+  `initial_value` に逆変換し、メンションをチップ表示します。
+- **移行**: 本仕様より前に手入力された素の `@yamadar` は遡及的にはリンク化されません
+  （編集・再入力で本物のメンションになります）。
+
+---
+
 ## 主要モジュール / 関数
 
 ### `app.js`
 
 | 区分 | 関数 | 役割 |
 | --- | --- | --- |
-| 整形 | `esc` / `jdate` / `todayJST` / `clip` / `body` | エスケープ・日時整形・本文整形 |
+| 整形 | `esc` / `htmlUnesc` / `jdate` / `todayJST` / `clip` / `body` | エスケープ・日時整形・本文整形 |
+| メンション | `mdSafe` / `richTextToMrkdwn` / `mrkdwnToRichText` | 表示安全化・rich_text ⇄ mrkdwn 変換 |
 | 期限 | `isOverdue` / `dueRelative` / `dueChip` | 期限切れ判定・相対表記・チップ |
 | 公開範囲 | `realName` / `canViewPrivate` / `isMasked` / `channelChip` | プレースホルダ除去・マスク判定・表示 |
 | フィルター | `getFilter` / `setFilter` / `applyFilter` | 取得・保存・適用 |

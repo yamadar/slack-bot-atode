@@ -16,7 +16,68 @@ const jdate = (ms) => new Date(ms).toLocaleString('ja-JP', { timeZone: 'Asia/Tok
 const todayJST = () => new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' });
 const clip = (s, n = 2900) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
 const SPACER = { type: 'section', text: { type: 'mrkdwn', text: '\u00A0' } };
-const body = (t) => clip(t.message_ts ? t.text : esc(t.text));
+// 保存テキストは全経路で Slack mrkdwn エンコード形（<@U…> 等＋ &<> はエスケープ済）に統一。
+// → 表示は二重エスケープせず mdSafe で安全化するだけ。
+const body = (t) => clip(mdSafe(t.text));
+
+// 表示用 Slack mrkdwn 安全化: ユーザー/チャンネル/リンクのメンションは保持し、
+// @channel/@here/@everyone・ユーザーグループは通知を飛ばさないようプレーン化する。
+function mdSafe(s) {
+  return String(s)
+    .replace(/<!subteam\^[A-Z0-9]+(?:\|([^>]+))?>/g, (_, l) => l || '@グループ')
+    .replace(/<!(channel|here|everyone)>/g, '@$1')
+    .replace(/<!date\^[^>]*\|([^>]+)>/g, '$1');
+}
+
+// rich_text_input の値 → 保存用 mrkdwn（メンションは <@U…> として残す）
+function richElToMrkdwn(el) {
+  switch (el.type) {
+    case 'text': return esc(el.text || '');
+    case 'user': return `<@${el.user_id}>`;
+    case 'channel': return `<#${el.channel_id}>`;
+    case 'link': return el.text ? `<${el.url}|${esc(el.text)}>` : `<${el.url}>`;
+    case 'usergroup': return `<!subteam^${el.usergroup_id}>`;
+    case 'broadcast': return `@${el.range}`; // 通知させない
+    case 'emoji': return el.name ? `:${el.name}:` : '';
+    default: return el.text ? esc(el.text) : '';
+  }
+}
+function richTextToMrkdwn(rt) {
+  if (!rt || !Array.isArray(rt.elements)) return '';
+  const section = (sec) => (sec.elements || []).map(richElToMrkdwn).join('');
+  return rt.elements.map((blk) => {
+    const isList = blk.type === 'rich_text_list';
+    return (blk.elements || []).map((e) =>
+      e && typeof e.type === 'string' && e.type.startsWith('rich_text') ? section(e) : richElToMrkdwn(e)
+    ).join(isList ? '\n' : '');
+  }).join('\n').replace(/\n{3,}/g, '\n\n').replace(/\s+$/, '');
+}
+// 保存用 mrkdwn → rich_text_input の initial_value（編集・メッセージ保存のプリフィル）
+const htmlUnesc = (s) => String(s).replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+function mrkdwnToRichText(s) {
+  const text = String(s || '');
+  const elements = [];
+  const push = (raw) => { if (raw) elements.push({ type: 'text', text: htmlUnesc(raw) }); };
+  const TOKEN = /<([^>\n]+)>/g;
+  let last = 0, m;
+  while ((m = TOKEN.exec(text))) {
+    push(text.slice(last, m.index));
+    const inner = m[1];
+    const bar = inner.indexOf('|');
+    const head = bar >= 0 ? inner.slice(0, bar) : inner;
+    const label = bar >= 0 ? inner.slice(bar + 1) : null;
+    if (head[0] === '@') elements.push({ type: 'user', user_id: head.slice(1) });
+    else if (head[0] === '#') elements.push({ type: 'channel', channel_id: head.slice(1) });
+    else if (head.startsWith('!subteam^')) elements.push({ type: 'usergroup', usergroup_id: head.slice(9) });
+    else if (head === '!channel' || head === '!here' || head === '!everyone') elements.push({ type: 'text', text: '@' + head.slice(1) });
+    else if (/^[a-z][a-z0-9+.\-]*:/i.test(head)) elements.push(label ? { type: 'link', url: head, text: htmlUnesc(label) } : { type: 'link', url: head });
+    else push('<' + inner + '>');
+    last = m.index + m[0].length;
+  }
+  push(text.slice(last));
+  if (!elements.length) elements.push({ type: 'text', text: '' });
+  return { type: 'rich_text', elements: [{ type: 'rich_text_section', elements }] };
+}
 
 function dueRelative(due, today) {
   const d = new Date(due + 'T00:00:00+09:00');
@@ -217,8 +278,8 @@ async function refresh(client, user) { await publish(client, user); await syncCh
 // ===== タスクモーダル（新規 / 編集） =====
 async function openTaskModal(client, trigger_id, opts = {}) {
   const { initialText = '', assignee = null, due = null, meta = null, title = 'タスク追加', submit = '追加' } = opts;
-  const textEl = { type: 'plain_text_input', action_id: 'text', multiline: true };
-  if (initialText) textEl.initial_value = initialText;
+  const textEl = { type: 'rich_text_input', action_id: 'text' };
+  if (initialText) textEl.initial_value = mrkdwnToRichText(initialText);
   const userEl = { type: 'users_select', action_id: 'user', placeholder: { type: 'plain_text', text: '選択（任意）' } };
   if (assignee) userEl.initial_user = assignee;
   const dateEl = { type: 'datepicker', action_id: 'date', placeholder: { type: 'plain_text', text: '選択（任意）' } };
@@ -345,7 +406,7 @@ app.action('task_menu', async ({ body: b, ack, action, client }) => {
 
 app.view('task_modal', async ({ view, ack, body: b, client }) => {
   const v = view.state.values;
-  const text = v.task.text.value?.trim();
+  const text = richTextToMrkdwn(v.task?.text?.rich_text_value).trim();
   const assignee = v.assignee?.user?.selected_user || null;
   const due = v.due?.date?.selected_date || null;
   if (!text) { await ack(); return; }
