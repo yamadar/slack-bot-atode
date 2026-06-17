@@ -26,6 +26,10 @@ oauth_config:
     bot:
       - commands
       - chat:write
+      - channels:read
+      - groups:read
+      - im:read
+      - mpim:read
 settings:
   event_subscriptions:
     bot_events:
